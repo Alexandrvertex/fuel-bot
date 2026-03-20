@@ -1,5 +1,6 @@
 import logging
 import os
+import json
 from datetime import datetime
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
@@ -23,7 +24,8 @@ def get_sheet():
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
     ]
-    creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
+    creds_json = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
+    creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
     return gspread.authorize(creds).open_by_key(SHEET_ID)
 
 def get_worksheet(name):
@@ -341,9 +343,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     refuel_handler = ConversationHandler(
-        entry_points=[
-            MessageHandler(filters.Regex("^⛽ Заправка$"), fuel_start),
-        ],
+        entry_points=[MessageHandler(filters.Regex("^⛽ Заправка$"), fuel_start)],
         states={
             STATE_FUEL_LITERS:  [MessageHandler(filters.TEXT & ~filters.COMMAND, fuel_get_liters)],
             STATE_FUEL_COST:    [MessageHandler(filters.TEXT & ~filters.COMMAND, fuel_get_cost)],
@@ -354,9 +354,7 @@ def main():
     )
 
     odo_handler = ConversationHandler(
-        entry_points=[
-            MessageHandler(filters.Regex("^📍 Пробег$"), odo_start),
-        ],
+        entry_points=[MessageHandler(filters.Regex("^📍 Пробег$"), odo_start)],
         states={
             STATE_ODO_KM: [MessageHandler(filters.TEXT & ~filters.COMMAND, odo_get_km)],
         },
