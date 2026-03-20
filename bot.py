@@ -128,7 +128,8 @@ async def fuel_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def fuel_get_liters(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         liters = float(update.message.text.replace(",", "."))
-        if liters <= 0 or liters > 500: raise ValueError
+        if liters <= 0 or liters > 500:
+            raise ValueError
     except:
         await update.message.reply_text("❌ Введите число литров, например: 45.5")
         return STATE_FUEL_LITERS
@@ -142,7 +143,8 @@ async def fuel_get_liters(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def fuel_get_cost(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         cost = float(update.message.text.replace(",", ".").replace(" ", ""))
-        if cost <= 0 or cost > 100000: raise ValueError
+        if cost <= 0 or cost > 100000:
+            raise ValueError
     except:
         await update.message.reply_text("❌ Введите сумму, например: 560")
         return STATE_FUEL_COST
@@ -178,7 +180,8 @@ async def fuel_get_station(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     odo    = ctx.user_data["odo"]
     try:
         price = save_refuel(driver, liters, cost, odo, station)
-        if odo > 0: save_odometer(driver, odo)
+        if odo > 0:
+            save_odometer(driver, odo)
         odo_str     = f"\n📍 Одометр: <b>{odo:,} км</b>".replace(",", " ") if odo else ""
         station_str = f"\n🏪 АЗС: <b>{station}</b>" if station else ""
         await update.message.reply_text(
@@ -192,7 +195,8 @@ async def fuel_get_station(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     f"🔔 <b>Новая заправка</b>\n🚗 {driver['plate']} · {driver['name']}\n⛽ {format_liters(liters)} · {format_money(cost)} · {price} MDL/л{odo_str}{station_str}",
                     parse_mode="HTML"
                 )
-            except: pass
+            except:
+                pass
     except Exception as e:
         log.error(f"save error: {e}")
         await update.message.reply_text("❌ Ошибка сохранения.", reply_markup=main_keyboard())
@@ -214,7 +218,8 @@ async def odo_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def odo_get_km(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         odo = int(update.message.text.strip().replace(" ", ""))
-        if odo <= 0 or odo > 9999999: raise ValueError
+        if odo <= 0 or odo > 9999999:
+            raise ValueError
     except:
         await update.message.reply_text("❌ Введите число км")
         return STATE_ODO_KM
@@ -258,7 +263,12 @@ async def cmd_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     lines = [f"📋 <b>История · {driver['plate']}</b>\n"]
     for r in reversed(records):
-        lines.append(f"──────────────\n📅 {r.get('date_time','—')}\n⛽ {format_liters(r.get('liters',0))} · {format_money(r.get('cost',0))}\n📈 {r.get('price_per_liter','—')} MDL/л" + (f"\n🏪 {r['station']}" if r.get('station') else ""))
+        lines.append(
+            f"──────────────\n📅 {r.get('date_time','—')}\n"
+            f"⛽ {format_liters(r.get('liters',0))} · {format_money(r.get('cost',0))}\n"
+            f"📈 {r.get('price_per_liter','—')} MDL/л"
+            + (f"\n🏪 {r['station']}" if r.get('station') else "")
+        )
     await update.message.reply_text("\n".join(lines), parse_mode="HTML", reply_markup=main_keyboard())
 
 async def cmd_report_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -276,7 +286,8 @@ async def cmd_report_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     by_car = {}
     for r in records:
         p = r.get("plate", "—")
-        if p not in by_car: by_car[p] = {"liters": 0, "cost": 0, "driver": r.get("driver_name", "—")}
+        if p not in by_car:
+            by_car[p] = {"liters": 0, "cost": 0, "driver": r.get("driver_name", "—")}
         by_car[p]["liters"] += float(r.get("liters", 0))
         by_car[p]["cost"]   += float(r.get("cost", 0))
     for plate, d in by_car.items():
@@ -311,11 +322,20 @@ async def unknown_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     uid  = update.effective_user.id
     kb   = admin_keyboard() if uid in ADMIN_IDS else main_keyboard()
-    if text == "📊 Мой статус":       await cmd_status(update, ctx)
-    elif text == "📋 История":         await cmd_history(update, ctx)
-    elif text == "👑 Отчёт сегодня":  await cmd_report_today(update, ctx)
-    elif text == "🚗 Все авто":        await cmd_all_cars(update, ctx)
-    else: await update.message.reply_text("Выберите действие из меню 👇", reply_markup=kb)
+    if text == "⛽ Заправка":
+        await fuel_start(update, ctx)
+    elif text == "📍 Пробег":
+        await odo_start(update, ctx)
+    elif text == "📊 Мой статус":
+        await cmd_status(update, ctx)
+    elif text == "📋 История":
+        await cmd_history(update, ctx)
+    elif text == "👑 Отчёт сегодня":
+        await cmd_report_today(update, ctx)
+    elif text == "🚗 Все авто":
+        await cmd_all_cars(update, ctx)
+    else:
+        await update.message.reply_text("Выберите действие из меню 👇", reply_markup=kb)
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
@@ -323,7 +343,6 @@ def main():
     refuel_handler = ConversationHandler(
         entry_points=[
             MessageHandler(filters.Regex("^⛽ Заправка$"), fuel_start),
-            CommandHandler("заправка", fuel_start),
         ],
         states={
             STATE_FUEL_LITERS:  [MessageHandler(filters.TEXT & ~filters.COMMAND, fuel_get_liters)],
@@ -331,28 +350,26 @@ def main():
             STATE_FUEL_ODO:     [MessageHandler(filters.TEXT & ~filters.COMMAND, fuel_get_odo)],
             STATE_FUEL_STATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, fuel_get_station)],
         },
-        fallbacks=[CommandHandler("отмена", cancel)],
+        fallbacks=[CommandHandler("cancel", cancel)],
     )
 
     odo_handler = ConversationHandler(
         entry_points=[
             MessageHandler(filters.Regex("^📍 Пробег$"), odo_start),
-            CommandHandler("пробег", odo_start),
         ],
         states={
             STATE_ODO_KM: [MessageHandler(filters.TEXT & ~filters.COMMAND, odo_get_km)],
         },
-        fallbacks=[CommandHandler("отмена", cancel)],
+        fallbacks=[CommandHandler("cancel", cancel)],
     )
 
-    app.add_handler(CommandHandler("start",  cmd_start))
-    app.add_handler(CommandHandler("help",   cmd_help))
-    app.add_handler(CommandHandler("отмена", cancel))
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(refuel_handler)
     app.add_handler(odo_handler)
-    app.add_handler(MessageHandler(filters.TEXT, unknown_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown_message))
 
-    log.info("🚀 Бот запущен!")
+    log.info("Bot started!")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
