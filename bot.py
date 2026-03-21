@@ -18,9 +18,9 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "385450206").split(",") if x
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 log = logging.getLogger(__name__)
 
-# Состояния диалогов
+# Состояния
 (STATE_FUEL_LITERS, STATE_FUEL_COST, STATE_FUEL_ODO, STATE_FUEL_STATION, 
- STATE_ODO_KM, STATE_REPAIR_DESC, STATE_SERVICE_DESC, STATE_SERVICE_COST) = range(8)
+ STATE_ODO_ONLY, STATE_REPAIR_DESC, STATE_SERVICE_DESC, STATE_SERVICE_COST) = range(8)
 
 # --- GOOGLE SHEETS CORE ---
 def get_sheet():
@@ -46,20 +46,26 @@ def get_car_info(plate):
             if str(r.get("plate", "")).upper() == str(plate).upper(): return r
     except: return None
 
-# --- ФОРМАТИРОВАНИЕ ---
+# --- ВСПОМОГАТЕЛЬНЫЕ ---
 def format_money(v): return f"{int(float(v)):,}".replace(",", " ") + " MDL"
 def format_liters(v): return f"{float(v):.1f} л"
 
-# --- ЛОГИКА ТО ---
+def save_odometer(driver, odo):
+    ws = get_worksheet("Автомобили")
+    for i, r in enumerate(ws.get_all_records(), start=2):
+        if str(r.get("plate", "")).upper() == str(driver.get("plate", "")).upper():
+            ws.update_cell(i, 5, odo) # Колонка E
+            ws.update_cell(i, 6, datetime.now().strftime("%d.%m.%Y %H:%M"))
+            return True
+    return False
+
 def check_service_remain(plate):
     try:
         car = get_car_info(plate)
         current_odo = int(car.get("odometer", 0))
         services = get_worksheet("Сервис").get_all_records()
         car_services = [s for s in services if str(s.get("plate", "")).upper() == str(plate).upper()]
-        
         if not car_services: return "Регламент не настроен."
-        
         report = []
         for s in car_services:
             try:
@@ -71,41 +77,7 @@ def check_service_remain(plate):
                 report.append(f"{status} {s.get('service_type')}: <b>{remain:,} км</b>".replace(",", " "))
             except: continue
         return "\n".join(report) if report else "Нет данных по ТО."
-    except: return "Ошибка расчета ТО."
-
-def save_service_done(driver, desc, cost):
-    ws_hist = get_worksheet("История_ТО")
-    ws_serv = get_worksheet("Сервис")
-    car = get_car_info(driver['plate'])
-    current_odo = int(car.get("odometer", 0))
-    now = datetime.now().strftime("%d.%m.%Y")
-    
-    ws_hist.append_row([now, driver['plate'], driver['name'], current_odo, desc, cost])
-    
-    records = ws_serv.get_all_records()
-    for i, r in enumerate(records, start=2):
-        if str(r.get("plate", "")).upper() == str(driver['plate']).upper():
-            interval = int(r.get("interval", 10000))
-            next_odo = current_odo + interval
-            ws_serv.update_cell(i, 3, current_odo) # last_service_odo
-            ws_serv.update_cell(i, 5, next_odo)    # next_service_odo (АВТОРАСЧЕТ)
-
-# --- ЗАПРАВКА И ПРОБЕГ ---
-def save_refuel(driver, liters, cost, odo, station):
-    ws = get_worksheet("Заправки")
-    now = datetime.now().strftime("%d.%m.%Y %H:%M")
-    price = round(cost / liters, 2) if liters else 0
-    ws.append_row([now, driver.get("plate",""), driver.get("name",""), driver.get("telegram_id",""), liters, cost, price, odo, station])
-    return price
-
-def save_odometer(driver, odo):
-    ws = get_worksheet("Автомобили")
-    for i, r in enumerate(ws.get_all_records(), start=2):
-        if str(r.get("plate", "")).upper() == str(driver.get("plate", "")).upper():
-            ws.update_cell(i, 5, odo) # Колонка E
-            ws.update_cell(i, 6, datetime.now().strftime("%d.%m.%Y %H:%M"))
-            return True
-    return False
+    except: return "Ошибка расчета."
 
 # --- КЛАВИАТУРЫ ---
 def main_kb(uid):
@@ -116,24 +88,52 @@ def main_kb(uid):
         btns.append([KeyboardButton("👑 Отчёт сегодня"), KeyboardButton("🚗 Все авто")])
     return ReplyKeyboardMarkup(btns, resize_keyboard=True)
 
-# --- ХЕНДЛЕРЫ ---
+# --- ОБРАБОТЧИКИ ---
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     driver = get_driver_info(uid)
     if not driver:
-        await update.message.reply_text(f"👋 Вы не зарегистрированы.\nВаш ID: {uid}")
+        await update.message.reply_text(f"👋 Вы не в системе. ID: {uid}")
         return
     await update.message.reply_text(f"✅ Привет, {driver['name']}!", reply_markup=main_kb(uid))
 
+# Диалог только пробега (С ПОКАЗОМ ТЕКУЩЕГО)
+async def odo_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    driver = get_driver_info(update.effective_user.id)
+    car = get_car_info(driver['plate'])
+    current_odo = car.get("odometer", 0)
+    
+    await update.message.reply_text(
+        f"📍 <b>Обновление пробега</b>\nАвто: {driver['plate']}\nТекущий в базе: <b>{current_odo:,} км</b>\n\nВведите новое значение:".replace(",", " "),
+        parse_mode="HTML"
+    )
+    return STATE_ODO_ONLY
+
+async def odo_finish(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        odo_text = update.message.text.replace(" ", "").replace(",", ".")
+        odo = int(float(odo_text))
+        driver = get_driver_info(update.effective_user.id)
+        save_odometer(driver, odo)
+        remain = check_service_remain(driver['plate'])
+        await update.message.reply_text(
+            f"✅ Пробег обновлен до {odo:,} км!\n\n💡 <b>Статус ТО:</b>\n{remain}".replace(",", " "),
+            parse_mode="HTML", 
+            reply_markup=main_kb(update.effective_user.id)
+        )
+    except:
+        await update.message.reply_text("❌ Ошибка. Введите только число (пробег).")
+    return ConversationHandler.END
+
+# Логика ТО
 async def service_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     driver = get_driver_info(update.effective_user.id)
     remain = check_service_remain(driver['plate'])
     kb = ReplyKeyboardMarkup([[KeyboardButton("✅ Выполнил ТО"), KeyboardButton("⬅️ Назад")]], resize_keyboard=True)
     await update.message.reply_text(f"⚙️ <b>ТО · {driver['plate']}</b>\n\n{remain}", parse_mode="HTML", reply_markup=kb)
 
-# Диалог ТО
 async def service_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📝 Что сделали? (запчасти, масло):")
+    await update.message.reply_text("📝 Что сделали? (масло, фильтры):")
     return STATE_SERVICE_DESC
 
 async def service_get_desc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -143,24 +143,24 @@ async def service_get_desc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def service_finish(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     driver = get_driver_info(update.effective_user.id)
-    save_service_done(driver, ctx.user_data["serv_desc"], update.message.text)
-    await update.message.reply_text("✅ Данные ТО обновлены!", reply_markup=main_kb(update.effective_user.id))
+    ws_hist = get_worksheet("История_ТО")
+    ws_serv = get_worksheet("Сервис")
+    car = get_car_info(driver['plate'])
+    curr_odo = int(car.get("odometer", 0))
+    
+    ws_hist.append_row([datetime.now().strftime("%d.%m.%Y"), driver['plate'], driver['name'], curr_odo, ctx.user_data["serv_desc"], update.message.text])
+    
+    records = ws_serv.get_all_records()
+    for i, r in enumerate(records, start=2):
+        if str(r.get("plate", "")).upper() == str(driver['plate']).upper():
+            inv = int(r.get("interval", 10000))
+            ws_serv.update_cell(i, 3, curr_odo)
+            ws_serv.update_cell(i, 5, curr_odo + inv)
+            
+    await update.message.reply_text("✅ ТО зафиксировано и регламент обновлен!", reply_markup=main_kb(update.effective_user.id))
     return ConversationHandler.END
 
-# Диалог Ремонта
-async def repair_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🛠 Опишите поломку/проблему:")
-    return STATE_REPAIR_DESC
-
-async def repair_finish(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    driver = get_driver_info(update.effective_user.id)
-    desc = update.message.text
-    for aid in ADMIN_IDS:
-        await ctx.bot.send_message(aid, f"🚨 <b>ПОЛОМКА</b>\nОт: {driver['name']} ({driver['plate']})\nСуть: {desc}", parse_mode="HTML")
-    await update.message.reply_text("✅ Сообщение отправлено Александру.", reply_markup=main_kb(update.effective_user.id))
-    return ConversationHandler.END
-
-# Диалог Заправки
+# Заправка
 async def fuel_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     driver = get_driver_info(update.effective_user.id)
     ctx.user_data["driver"] = driver
@@ -179,56 +179,56 @@ async def fuel_get_cost(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def fuel_get_odo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["odo"] = int(update.message.text.replace(" ", ""))
-    await update.message.reply_text("АЗС (или пропустить):")
+    await update.message.reply_text("Название АЗС:")
     return STATE_FUEL_STATION
 
 async def fuel_get_station(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     driver = ctx.user_data["driver"]
-    save_refuel(driver, ctx.user_data["liters"], ctx.user_data["cost"], ctx.user_data["odo"], update.message.text)
+    ws = get_worksheet("Заправки")
+    price = round(ctx.user_data["cost"] / ctx.user_data["liters"], 2)
+    ws.append_row([datetime.now().strftime("%d.%m.%Y %H:%M"), driver['plate'], driver['name'], driver['telegram_id'], ctx.user_data["liters"], ctx.user_data["cost"], price, ctx.user_data["odo"], update.message.text])
     save_odometer(driver, ctx.user_data["odo"])
-    remain = check_service_remain(driver['plate'])
-    await update.message.reply_text(f"✅ Сохранено!\n\n💡 <b>Статус ТО:</b>\n{remain}", parse_mode="HTML", reply_markup=main_kb(update.effective_user.id))
+    await update.message.reply_text("✅ Заправка сохранена!", reply_markup=main_kb(update.effective_user.id))
     return ConversationHandler.END
 
-# Отчет сегодня
 async def cmd_report_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS: return
     today = datetime.now().strftime("%d.%m.%Y")
-    
-    # Заправки
     records = get_worksheet("Заправки").get_all_records()
     today_f = [r for r in records if str(r.get("date_time", "")).startswith(today)]
-    
-    # ТО
-    history = get_worksheet("История_ТО").get_all_records()
-    today_s = [h for h in history if str(h.get("date", "")) == today]
-
-    lines = [f"👑 <b>ОТЧЕТ ЗА {today}</b>\n"]
-    lines.append(f"⛽ <b>Топливо:</b> {format_liters(sum(float(r.get('liters',0)) for r in today_f))} на {format_money(sum(float(r.get('cost',0)) for r in today_f))}")
-    
-    lines.append(f"\n⚙️ <b>Выполненные ТО:</b>")
-    if today_s:
-        for s in today_s: lines.append(f"• {s['plate']}: {s['work_details']} ({s['cost']} MDL)")
-    else: lines.append("• Сегодня без ТО.")
-    
-    lines.append(f"\n🚗 <b>Детали по авто:</b>")
-    for r in today_f: lines.append(f"• {r['plate']}: {format_liters(r['liters'])} ({format_money(r['cost'])})")
-    
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    total_l = sum(float(r.get('liters', 0)) for r in today_f)
+    total_c = sum(float(r.get('cost', 0)) for r in today_f)
+    await update.message.reply_text(f"👑 <b>ОТЧЕТ {today}</b>\n⛽ {total_l:.1f}л на {total_c} MDL", parse_mode="HTML")
 
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     t = update.message.text
-    uid = update.effective_user.id
     if t == "⚙️ Сервис/ТО": await service_menu(update, ctx)
-    elif t == "🛠 Ремонт": await repair_start(update, ctx)
     elif t == "👑 Отчёт сегодня": await cmd_report_today(update, ctx)
+    elif t == "🛠 Ремонт":
+        driver = get_driver_info(update.effective_user.id)
+        await update.message.reply_text("🛠 Опишите поломку:")
+        return STATE_REPAIR_DESC
     elif t == "⬅️ Назад": await cmd_start(update, ctx)
-    else: await update.message.reply_text("Выберите пункт меню 👇", reply_markup=main_kb(uid))
+    else: await update.message.reply_text("Используйте меню 👇")
+
+async def repair_finish(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    driver = get_driver_info(update.effective_user.id)
+    for aid in ADMIN_IDS:
+        await ctx.bot.send_message(aid, f"🚨 <b>ПОЛОМКА</b>\n{driver['name']} ({driver['plate']})\n{update.message.text}", parse_mode="HTML")
+    await update.message.reply_text("✅ Отправлено Александру.", reply_markup=main_kb(update.effective_user.id))
+    return ConversationHandler.END
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Стейты для заправки
+    # Стейты пробега
+    app.add_handler(ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^📍 Пробег$"), odo_start)],
+        states={STATE_ODO_ONLY: [MessageHandler(filters.TEXT & ~filters.COMMAND, odo_finish)]},
+        fallbacks=[CommandHandler("cancel", cmd_start)]
+    ))
+
+    # Стейты заправки
     app.add_handler(ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^⛽ Заправка$"), fuel_start)],
         states={
@@ -239,25 +239,9 @@ def main():
         }, fallbacks=[CommandHandler("cancel", cmd_start)]
     ))
 
-    # Стейты для ТО
+    # Стейты ТО
     app.add_handler(ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^✅ Выполнил ТО$"), service_start)],
         states={
             STATE_SERVICE_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, service_get_desc)],
-            STATE_SERVICE_COST: [MessageHandler(filters.TEXT & ~filters.COMMAND, service_finish)],
-        }, fallbacks=[CommandHandler("cancel", cmd_start)]
-    ))
-
-    # Стейты для ремонта
-    app.add_handler(ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^🛠 Ремонт$"), repair_start)],
-        states={STATE_REPAIR_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, repair_finish)]},
-        fallbacks=[CommandHandler("cancel", cmd_start)]
-    ))
-
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+            STATE_SERVICE_COST: [MessageHandler(
