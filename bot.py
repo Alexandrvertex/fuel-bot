@@ -10,16 +10,16 @@ from telegram.ext import (
 import gspread
 from google.oauth2.service_account import Credentials
 
-# --- НАСТРОЙКИ (Константы из вашего профиля) ---
+# --- НАСТРОЙКИ ---
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8613265488:AAFe1sVGy8p7zCbeuI4y3mIbAxl8cXExAcE")
 SHEET_ID  = os.getenv("SHEET_ID",  "100axoRGeQQnpYKZzb7k_hWStxueXF0yP88kQlZbHHAI")
 ADMIN_IDS = [385450206] 
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 
-# Состояния диалогов (чтобы бот не путался)
-(ODO_S, WASH_D, WASH_C, FUEL_L, FUEL_C, FUEL_O, 
- SERV_S, REPAIR_S, ADMIN_P) = range(9)
+# Состояния диалогов
+(ODO_S, WASH_D, WASH_C, FUEL_L, FUEL_C, FUEL_O, FUEL_ST,
+ SERV_S, REPAIR_S, ADMIN_P) = range(10)
 
 # Список кнопок для проверки выхода из диалога
 MENU_BTNS = [
@@ -123,7 +123,7 @@ async def cmd_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             
     for f in f_recs:
         if (is_admin or f['plate'] == driver['plate']):
-            f_date = f['date_time'].split()[0]
+            f_date = str(f.get('date_time', '')).split()[0]
             if today_only and f_date != filter_date: continue
             cost = parse_val(f.get('cost', 0))
             total += cost
@@ -153,7 +153,7 @@ async def odo_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Пробег {int(val):,} км сохранен", reply_markup=main_kb(update.effective_user.id))
     return ConversationHandler.END
 
-# 2. Заправка
+# 2. Заправка (Исправлено под структуру таблицы из 9 колонок)
 async def fuel_init(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⛽ Сколько литров заправили?")
     return FUEL_L
@@ -170,10 +170,38 @@ async def fuel_c_step(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📍 Пробег при заправке:")
     return FUEL_O
 
+async def fuel_o_step(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.message.text in MENU_BTNS: return await start(update, ctx)
+    ctx.user_data["f_o"] = update.message.text
+    await update.message.reply_text("🏢 Название АЗС (например, Petrom):")
+    return FUEL_ST
+
 async def fuel_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.message.text in MENU_BTNS: return await start(update, ctx)
+    
     driver = get_driver(update.effective_user.id)
-    get_ws("Заправки").append_row([datetime.now().strftime("%d.%m.%Y %H:%M"), driver['plate'], ctx.user_data["f_l"], ctx.user_data["f_c"], update.message.text])
+    
+    liters = parse_val(ctx.user_data.get("f_l", "0"))
+    cost = parse_val(ctx.user_data.get("f_c", "0"))
+    odo = ctx.user_data.get("f_o", "0")
+    station = update.message.text
+    
+    price_per_liter = round(cost / liters, 2) if liters > 0 else 0
+    
+    # Запись строго в соответствии с колонками (A-I)
+    row = [
+        datetime.now().strftime("%d.%m.%Y %H:%M"), 
+        driver['plate'], 
+        driver['name'], 
+        str(driver['telegram_id']), 
+        liters, 
+        cost, 
+        price_per_liter, 
+        odo, 
+        station
+    ]
+    
+    get_ws("Заправки").append_row(row)
     await update.message.reply_text("✅ Заправка записана", reply_markup=main_kb(update.effective_user.id))
     return ConversationHandler.END
 
@@ -208,7 +236,6 @@ async def work_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     car = next((c for c in get_ws("Автомобили").get_all_records() if str(c['plate']).upper() == driver['plate'].upper()), None)
     odo = car.get('odometer', 0)
     
-    # Авто-обновление регламента для Сервиса
     if ctx.user_data.get("is_serv"):
         sws = get_ws("Сервис")
         for i, r in enumerate(sws.get_all_records(), 2):
@@ -245,17 +272,23 @@ async def admin_p_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Обработчики сценариев (ConversationHandlers)
     app.add_handler(ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^📍 Пробег$"), odo_init)],
         states={ODO_S: [MessageHandler(filters.TEXT & ~filters.COMMAND, odo_save)]},
         fallbacks=[MessageHandler(filters.ALL, start)]
     ))
+    
     app.add_handler(ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^⛽ Заправка$"), fuel_init)],
-        states={FUEL_L: [MessageHandler(filters.TEXT, fuel_l_step)], FUEL_C: [MessageHandler(filters.TEXT, fuel_c_step)], FUEL_O: [MessageHandler(filters.TEXT, fuel_save)]},
+        states={
+            FUEL_L: [MessageHandler(filters.TEXT, fuel_l_step)], 
+            FUEL_C: [MessageHandler(filters.TEXT, fuel_c_step)], 
+            FUEL_O: [MessageHandler(filters.TEXT, fuel_o_step)],
+            FUEL_ST: [MessageHandler(filters.TEXT, fuel_save)]
+        },
         fallbacks=[MessageHandler(filters.ALL, start)]
     ))
+    
     app.add_handler(ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^🧽 Мойка$"), wash_init)],
         states={WASH_D: [MessageHandler(filters.TEXT, wash_d_step)], WASH_C: [MessageHandler(filters.TEXT, wash_save)]},
@@ -272,7 +305,6 @@ def main():
         fallbacks=[CommandHandler("start", start)]
     ))
 
-    # Обычные команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Regex("^📊 Мой статус$"), cmd_status))
     app.add_handler(MessageHandler(filters.Regex("^🚗 Все авто$"), cmd_all_cars))
