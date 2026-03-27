@@ -29,7 +29,6 @@ MENU_BTNS = [
 # --- ИНСТРУМЕНТЫ GOOGLE TABLES ---
 def get_ws(name):
     scopes = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    # Предполагается наличие переменной окружения с JSON ключом
     creds_json = json.loads(os.getenv("GOOGLE_CREDENTIALS"))
     creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
     return gspread.authorize(creds).open_by_key(SHEET_ID).worksheet(name)
@@ -57,7 +56,6 @@ def main_kb(uid):
     return ReplyKeyboardMarkup(btns, resize_keyboard=True)
 
 def get_wash_kb(selected):
-    """Генерирует клавиатуру с галочками"""
     b_mark = "✅" if "body" in selected else "⬜"
     i_mark = "✅" if "interior" in selected else "⬜"
     
@@ -65,7 +63,6 @@ def get_wash_kb(selected):
         [InlineKeyboardButton(f"{b_mark} Кузов", callback_data="t_body")],
         [InlineKeyboardButton(f"{i_mark} Салон", callback_data="t_interior")]
     ]
-    # Кнопка подтверждения появляется только если что-то выбрано
     if selected:
         kb.append([InlineKeyboardButton("➡️ Подтвердить выбор", callback_data="wash_confirm")])
     return InlineKeyboardMarkup(kb)
@@ -92,7 +89,109 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (f"📊 <b>СТАТУС: {driver['plate']}</b>\n🛣 Пробег: {odo:,} км\n\n🛠 <b>План регламентных работ:</b>\n" + ("\n".join(plan) if plan else "Регламент не задан")).replace(",", " ")
     await update.message.reply_text(text, parse_mode="HTML")
 
-# --- ЛОГИКА МОЙКИ (УЛУЧШЕННАЯ) ---
+# --- ИСТОРИЯ (ТОЛЬКО ОБЩАЯ) ---
+async def cmd_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    driver = get_driver(uid)
+    is_admin = uid in ADMIN_IDS
+    
+    h_recs = get_ws("История_ТО").get_all_records()
+    f_recs = get_ws("Заправки").get_all_records()
+    lines, total = [], 0.0
+    
+    for r in h_recs:
+        if (is_admin or r['plate'] == driver['plate']):
+            cost = parse_val(r.get('cost', 0))
+            total += cost
+            lines.append(f"• {r['date']} | {r['plate']} | {r['work_details']} | {cost:,.0f} MDL")
+            
+    for f in f_recs:
+        if (is_admin or f['plate'] == driver['plate']):
+            f_date = str(f.get('date_time', '')).split()[0]
+            cost = parse_val(f.get('cost', 0))
+            total += cost
+            lines.append(f"• {f_date} | {f['plate']} | ⛽ {f['liters']}л | {cost:,.0f} MDL")
+
+    await update.message.reply_text(f"📋 <b>ИСТОРИЯ (30 дн)</b>\n\n" + ("\n".join(lines[-20:]) if lines else "Записей нет.") + f"\n\n💰 <b>ИТОГО: {total:,.2f} MDL</b>".replace(",", " "), parse_mode="HTML")
+
+# --- НОВЫЙ ОТЧЕТ ЗА СЕГОДНЯ ---
+async def cmd_report_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    today_str = datetime.now().strftime("%d.%m.%Y")
+    
+    # Находим все привязанные авто к этому пользователю
+    drivers_recs = get_ws("Водители").get_all_records()
+    linked_plates = [str(r['plate']).upper() for r in drivers_recs if str(r.get('telegram_id')) == str(uid)]
+    
+    if not linked_plates:
+        await update.message.reply_text("❌ За вашим профилем не закреплено ни одного автомобиля.")
+        return
+
+    # Загружаем данные из таблиц один раз для скорости
+    cars_recs = get_ws("Автомобили").get_all_records()
+    serv_recs = get_ws("Сервис").get_all_records()
+    hist_recs = get_ws("История_ТО").get_all_records()
+    fuel_recs = get_ws("Заправки").get_all_records()
+
+    report_lines = [f"👑 <b>ОТЧЕТ ЗА СЕГОДНЯ ({today_str})</b>\n"]
+    grand_total = 0.0
+
+    for plate in linked_plates:
+        car_info = next((c for c in cars_recs if str(c.get('plate', '')).upper() == plate), {})
+        odo = int(car_info.get('odometer', 0))
+        tech_insp = car_info.get('tech_inspection', 'Нет данных')
+        insurance = car_info.get('insurance', 'Нет данных')
+
+        report_lines.append(f"🚗 <b>{plate}</b>")
+        report_lines.append(f"📍 Пробег: {odo:,} км".replace(",", " "))
+        report_lines.append(f"📄 Тех. осмотр до: {tech_insp}")
+        report_lines.append(f"🛡 Страховка до: {insurance}\n")
+
+        # Затраты за сегодня
+        car_total = 0.0
+        expenses_text = []
+
+        for r in hist_recs:
+            if str(r.get('plate', '')).upper() == plate and r.get('date') == today_str:
+                cost = parse_val(r.get('cost', 0))
+                car_total += cost
+                expenses_text.append(f"  • {r.get('work_details', 'Работы')} | {cost:,.0f} MDL")
+
+        for f in fuel_recs:
+            f_date = str(f.get('date_time', '')).split()[0]
+            if str(f.get('plate', '')).upper() == plate and f_date == today_str:
+                cost = parse_val(f.get('cost', 0))
+                car_total += cost
+                expenses_text.append(f"  • ⛽ {f.get('liters', 0)}л | {cost:,.0f} MDL")
+
+        if expenses_text:
+            report_lines.append("💰 <b>Затраты за сегодня:</b>")
+            report_lines.extend(expenses_text)
+            report_lines.append(f"  <i>Итого по авто: {car_total:,.0f} MDL</i>\n")
+        else:
+            report_lines.append("💰 Затраты за сегодня: 0 MDL\n")
+
+        grand_total += car_total
+
+        # Остаток до сервиса
+        report_lines.append("🛠 <b>Остаток до сервиса:</b>")
+        car_services = [s for s in serv_recs if str(s.get('plate', '')).upper() == plate]
+        if car_services:
+            for s in car_services:
+                nxt = int(s.get('next_service_odo', 0))
+                rem = nxt - odo
+                icon = "🚨" if rem <= 0 else ("⚠️" if rem < 1000 else "✅")
+                report_lines.append(f"  {icon} {s.get('service_type', 'ТО')}: ост. {rem:,} км".replace(",", " "))
+        else:
+            report_lines.append("  Регламент не задан")
+            
+        report_lines.append("\n" + "—"*20 + "\n")
+
+    report_lines.append(f"💵 <b>ОБЩИЕ ЗАТРАТЫ ЗА СЕГОДНЯ: {grand_total:,.2f} MDL</b>".replace(",", " "))
+
+    await update.message.reply_text("\n".join(report_lines), parse_mode="HTML")
+
+# --- ЛОГИКА МОЙКИ ---
 async def wash_init(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["w_selected"] = []
     await update.message.reply_text("🧽 Выберите тип мойки (можно оба):", reply_markup=get_wash_kb([]))
@@ -111,7 +210,6 @@ async def wash_toggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         selected.append(choice)
     
     ctx.user_data["w_selected"] = selected
-    # Обновляем только кнопки, не переотправляя сообщение
     await query.edit_message_reply_markup(reply_markup=get_wash_kb(selected))
     return WASH_TYPE
 
@@ -259,11 +357,24 @@ async def repair_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Запись о ремонте создана", reply_markup=main_kb(update.effective_user.id))
     return ConversationHandler.END
 
+# --- АДМИН: ЦЕНА ---
+async def admin_p_init(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    ctx.user_data["e_row"] = query.data.split("_")[1]
+    await query.message.reply_text("Введите сумму (MDL):")
+    return ADMIN_P
+
+async def admin_p_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    val = "".join(filter(str.isdigit, update.message.text))
+    get_ws("История_ТО").update_cell(int(ctx.user_data["e_row"]), 6, val)
+    await update.message.reply_text(f"✅ Цена {val} MDL сохранена.")
+    return ConversationHandler.END
+
 # --- ЗАПУСК ---
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Сборка всех диалогов
     handlers = [
         ConversationHandler(
             entry_points=[MessageHandler(filters.Regex("^📍 Пробег$"), odo_init)],
@@ -303,6 +414,11 @@ def main():
             entry_points=[MessageHandler(filters.Regex("^🛠 Ремонт$"), repair_init)],
             states={REPAIR_S: [MessageHandler(filters.TEXT, repair_save)]},
             fallbacks=[MessageHandler(filters.ALL, start)]
+        ),
+        ConversationHandler(
+            entry_points=[CallbackQueryHandler(admin_p_init, pattern="^p_")],
+            states={ADMIN_P: [MessageHandler(filters.TEXT, admin_p_save)]},
+            fallbacks=[CommandHandler("start", start)]
         )
     ]
 
@@ -310,7 +426,9 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Regex("^📊 Мой статус$"), cmd_status))
-    # Другие админские и информационные команды можно добавить аналогично
+    app.add_handler(MessageHandler(filters.Regex("^📋 История$"), cmd_history))
+    app.add_handler(MessageHandler(filters.Regex("^👑 Отчёт сегодня$"), cmd_report_today))
+    app.add_handler(MessageHandler(filters.Regex("^🚗 Все авто$"), cmd_status)) # Если нужно, можно тоже вынести логику "Все авто"
     
     app.run_polling()
 
