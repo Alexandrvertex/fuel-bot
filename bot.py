@@ -67,13 +67,23 @@ def get_wash_kb(selected):
         kb.append([InlineKeyboardButton("➡️ Подтвердить выбор", callback_data="wash_confirm")])
     return InlineKeyboardMarkup(kb)
 
-# --- БАЗОВЫЕ КОМАНДЫ ---
+# --- СТАРТ / СБРОС ---
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # Очищаем все временные данные диалогов (жесткий сброс)
+    ctx.user_data.clear()
+    
     driver = get_driver(update.effective_user.id)
-    if not driver: return ConversationHandler.END
-    await update.message.reply_text(f"✅ Привет, {driver['name']}!", reply_markup=main_kb(update.effective_user.id))
+    if not driver: 
+        await update.message.reply_text("❌ Доступ запрещен. Вы не числитесь в таблице водителей.")
+        return ConversationHandler.END
+        
+    await update.message.reply_text(
+        f"✅ Привет, {driver['name']}!\n\nГлавное меню открыто. Если случайно нажмешь не ту кнопку — просто отправь /start для сброса.", 
+        reply_markup=main_kb(update.effective_user.id)
+    )
     return ConversationHandler.END
 
+# --- БАЗОВЫЕ КОМАНДЫ (СТАТУС И ИСТОРИЯ) ---
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     driver = get_driver(update.effective_user.id)
     if not driver: return
@@ -89,7 +99,6 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (f"📊 <b>СТАТУС: {driver['plate']}</b>\n🛣 Пробег: {odo:,} км\n\n🛠 <b>План регламентных работ:</b>\n" + ("\n".join(plan) if plan else "Регламент не задан")).replace(",", " ")
     await update.message.reply_text(text, parse_mode="HTML")
 
-# --- ИСТОРИЯ (ТОЛЬКО ОБЩАЯ) ---
 async def cmd_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     driver = get_driver(uid)
@@ -114,12 +123,10 @@ async def cmd_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"📋 <b>ИСТОРИЯ (30 дн)</b>\n\n" + ("\n".join(lines[-20:]) if lines else "Записей нет.") + f"\n\n💰 <b>ИТОГО: {total:,.2f} MDL</b>".replace(",", " "), parse_mode="HTML")
 
-# --- НОВЫЙ ОТЧЕТ ЗА СЕГОДНЯ ---
 async def cmd_report_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     today_str = datetime.now().strftime("%d.%m.%Y")
     
-    # Находим все привязанные авто к этому пользователю
     drivers_recs = get_ws("Водители").get_all_records()
     linked_plates = [str(r['plate']).upper() for r in drivers_recs if str(r.get('telegram_id')) == str(uid)]
     
@@ -127,7 +134,6 @@ async def cmd_report_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ За вашим профилем не закреплено ни одного автомобиля.")
         return
 
-    # Загружаем данные из таблиц один раз для скорости
     cars_recs = get_ws("Автомобили").get_all_records()
     serv_recs = get_ws("Сервис").get_all_records()
     hist_recs = get_ws("История_ТО").get_all_records()
@@ -147,7 +153,6 @@ async def cmd_report_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         report_lines.append(f"📄 Тех. осмотр до: {tech_insp}")
         report_lines.append(f"🛡 Страховка до: {insurance}\n")
 
-        # Затраты за сегодня
         car_total = 0.0
         expenses_text = []
 
@@ -173,7 +178,6 @@ async def cmd_report_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         grand_total += car_total
 
-        # Остаток до сервиса
         report_lines.append("🛠 <b>Остаток до сервиса:</b>")
         car_services = [s for s in serv_recs if str(s.get('plate', '')).upper() == plate]
         if car_services:
@@ -200,15 +204,10 @@ async def wash_init(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def wash_toggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     choice = query.data.replace("t_", "")
     selected = ctx.user_data.get("w_selected", [])
-    
-    if choice in selected:
-        selected.remove(choice)
-    else:
-        selected.append(choice)
-    
+    if choice in selected: selected.remove(choice)
+    else: selected.append(choice)
     ctx.user_data["w_selected"] = selected
     await query.edit_message_reply_markup(reply_markup=get_wash_kb(selected))
     return WASH_TYPE
@@ -216,15 +215,10 @@ async def wash_toggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def wash_confirm_selection(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     mapping = {"body": "Кузов", "interior": "Салон"}
     readable = [mapping[item] for item in ctx.user_data["w_selected"]]
     ctx.user_data["w_final_desc"] = " + ".join(readable)
-    
-    await query.edit_message_text(
-        f"Выбрано: <b>{ctx.user_data['w_final_desc']}</b>\n\nВведите общую стоимость (MDL):", 
-        parse_mode="HTML"
-    )
+    await query.edit_message_text(f"Выбрано: <b>{ctx.user_data['w_final_desc']}</b>\n\nВведите общую стоимость (MDL):", parse_mode="HTML")
     return WASH_C
 
 async def wash_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -232,19 +226,8 @@ async def wash_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     driver = get_driver(update.effective_user.id)
     cost = update.message.text
     desc = ctx.user_data.get("w_final_desc", "Мойка")
-    
-    get_ws("История_ТО").append_row([
-        datetime.now().strftime("%d.%m.%Y"), 
-        driver['plate'], 
-        driver['name'], 
-        "-", 
-        f"МОЙКА: {desc}", 
-        cost
-    ])
-    await update.message.reply_text(
-        f"✅ Данные сохранены: {desc} за {cost} MDL", 
-        reply_markup=main_kb(update.effective_user.id)
-    )
+    get_ws("История_ТО").append_row([datetime.now().strftime("%d.%m.%Y"), driver['plate'], driver['name'], "-", f"МОЙКА: {desc}", cost])
+    await update.message.reply_text(f"✅ Данные сохранены: {desc} за {cost} MDL", reply_markup=main_kb(update.effective_user.id))
     return ConversationHandler.END
 
 # --- ЛОГИКА ПРОБЕГА ---
@@ -295,17 +278,7 @@ async def fuel_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     liters = parse_val(ctx.user_data.get("f_l", "0"))
     cost = parse_val(ctx.user_data.get("f_c", "0"))
     odo = ctx.user_data.get("f_o", "0")
-    row = [
-        datetime.now().strftime("%d.%m.%Y %H:%M"), 
-        driver['plate'], 
-        driver['name'], 
-        str(driver['telegram_id']), 
-        liters, 
-        cost, 
-        round(cost/liters, 2) if liters > 0 else 0, 
-        odo, 
-        update.message.text
-    ]
+    row = [datetime.now().strftime("%d.%m.%Y %H:%M"), driver['plate'], driver['name'], str(driver['telegram_id']), liters, cost, round(cost/liters, 2) if liters > 0 else 0, odo, update.message.text]
     get_ws("Заправки").append_row(row)
     await update.message.reply_text("✅ Заправка записана", reply_markup=main_kb(update.effective_user.id))
     return ConversationHandler.END
@@ -375,21 +348,24 @@ async def admin_p_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # Универсальный обработчик отмены
+    cancel_handler = CommandHandler("start", start)
+
     handlers = [
         ConversationHandler(
             entry_points=[MessageHandler(filters.Regex("^📍 Пробег$"), odo_init)],
             states={ODO_S: [MessageHandler(filters.TEXT & ~filters.COMMAND, odo_save)]},
-            fallbacks=[MessageHandler(filters.ALL, start)]
+            fallbacks=[cancel_handler]
         ),
         ConversationHandler(
             entry_points=[MessageHandler(filters.Regex("^⛽ Заправка$"), fuel_init)],
             states={
-                FUEL_L: [MessageHandler(filters.TEXT, fuel_l_step)], 
-                FUEL_C: [MessageHandler(filters.TEXT, fuel_c_step)], 
-                FUEL_O: [MessageHandler(filters.TEXT, fuel_o_step)], 
-                FUEL_ST: [MessageHandler(filters.TEXT, fuel_save)]
+                FUEL_L: [MessageHandler(filters.TEXT & ~filters.COMMAND, fuel_l_step)], 
+                FUEL_C: [MessageHandler(filters.TEXT & ~filters.COMMAND, fuel_c_step)], 
+                FUEL_O: [MessageHandler(filters.TEXT & ~filters.COMMAND, fuel_o_step)], 
+                FUEL_ST: [MessageHandler(filters.TEXT & ~filters.COMMAND, fuel_save)]
             },
-            fallbacks=[MessageHandler(filters.ALL, start)]
+            fallbacks=[cancel_handler]
         ),
         ConversationHandler(
             entry_points=[MessageHandler(filters.Regex("^🧽 Мойка$"), wash_init)],
@@ -400,35 +376,36 @@ def main():
                 ],
                 WASH_C: [MessageHandler(filters.TEXT & ~filters.COMMAND, wash_save)]
             },
-            fallbacks=[MessageHandler(filters.ALL, start)]
+            fallbacks=[cancel_handler]
         ),
         ConversationHandler(
             entry_points=[MessageHandler(filters.Regex("^⚙️ Сервис/ТО$"), work_init)],
             states={
                 SERV_TYPE: [CallbackQueryHandler(service_selected, pattern="^svc_")], 
-                SERV_ODO: [MessageHandler(filters.TEXT, service_save)]
+                SERV_ODO: [MessageHandler(filters.TEXT & ~filters.COMMAND, service_save)]
             },
-            fallbacks=[MessageHandler(filters.ALL, start)]
+            fallbacks=[cancel_handler]
         ),
         ConversationHandler(
             entry_points=[MessageHandler(filters.Regex("^🛠 Ремонт$"), repair_init)],
-            states={REPAIR_S: [MessageHandler(filters.TEXT, repair_save)]},
-            fallbacks=[MessageHandler(filters.ALL, start)]
+            states={REPAIR_S: [MessageHandler(filters.TEXT & ~filters.COMMAND, repair_save)]},
+            fallbacks=[cancel_handler]
         ),
         ConversationHandler(
             entry_points=[CallbackQueryHandler(admin_p_init, pattern="^p_")],
-            states={ADMIN_P: [MessageHandler(filters.TEXT, admin_p_save)]},
-            fallbacks=[CommandHandler("start", start)]
+            states={ADMIN_P: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_p_save)]},
+            fallbacks=[cancel_handler]
         )
     ]
 
     for h in handlers: app.add_handler(h)
 
+    # Основные команды вне диалогов
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Regex("^📊 Мой статус$"), cmd_status))
     app.add_handler(MessageHandler(filters.Regex("^📋 История$"), cmd_history))
     app.add_handler(MessageHandler(filters.Regex("^👑 Отчёт сегодня$"), cmd_report_today))
-    app.add_handler(MessageHandler(filters.Regex("^🚗 Все авто$"), cmd_status)) # Если нужно, можно тоже вынести логику "Все авто"
+    app.add_handler(MessageHandler(filters.Regex("^🚗 Все авто$"), cmd_status))
     
     app.run_polling()
 
