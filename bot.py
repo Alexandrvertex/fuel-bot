@@ -23,7 +23,8 @@ logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=lo
 
 MENU_BTNS = [
     "⛽ Заправка", "📍 Пробег", "⚙️ Сервис/ТО", "🛠 Ремонт", 
-    "🧽 Мойка", "📊 Мой статус", "📋 История", "👑 Отчёт сегодня", "🚗 Все авто"
+    "🧽 Мойка", "📊 Мой статус", "📋 История", "👑 Отчёт сегодня", 
+    "🚗 Все авто", "📈 Эффективность"
 ]
 
 # --- ИНСТРУМЕНТЫ GOOGLE TABLES ---
@@ -53,6 +54,7 @@ def main_kb(uid):
     ]
     if uid in ADMIN_IDS:
         btns.append([KeyboardButton("👑 Отчёт сегодня"), KeyboardButton("🚗 Все авто")])
+        btns.append([KeyboardButton("📈 Эффективность")])
     return ReplyKeyboardMarkup(btns, resize_keyboard=True)
 
 def get_wash_kb(selected):
@@ -107,56 +109,137 @@ async def cmd_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             lines.append(f"• {f_date} | {f['plate']} | ⛽ {f['liters']}л | {cost:,.0f} MDL")
     await update.message.reply_text(f"📋 <b>ИСТОРИЯ (30 дн)</b>\n\n" + ("\n".join(lines[-20:]) if lines else "Записей нет.") + f"\n\n💰 <b>ИТОГО: {total:,.2f} MDL</b>".replace(",", " "), parse_mode="HTML")
 
-# --- ОТЧЕТЫ (СЕГОДНЯ И ГОД) ---
+# --- ОТЧЕТЫ АДМИНИСТРАТОРА ---
+
 async def cmd_report_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    if uid not in ADMIN_IDS: return  # Только для админа
+
     today_str = datetime.now().strftime("%d.%m.%Y")
-    drivers_recs = get_ws("Водители").get_all_records()
-    linked_plates = [str(r['plate']).upper() for r in drivers_recs if str(r.get('telegram_id')) == str(uid)]
-    if not linked_plates: return
+    cars_recs = get_ws("Автомобили").get_all_records()
+    hist_recs = get_ws("История_ТО").get_all_records()
+    fuel_recs = get_ws("Заправки").get_all_records()
 
-    cars_recs, serv_recs = get_ws("Автомобили").get_all_records(), get_ws("Сервис").get_all_records()
-    hist_recs, fuel_recs = get_ws("История_ТО").get_all_records(), get_ws("Заправки").get_all_records()
-    report_lines, grand_total = [f"👑 <b>ОТЧЕТ ЗА СЕГОДНЯ ({today_str})</b>\n"], 0.0
+    # Ищем машины, у которых была активность сегодня
+    active_plates = set()
+    for r in hist_recs:
+        if str(r.get('date', '')) == today_str:
+            active_plates.add(str(r.get('plate', '')).upper())
+    for f in fuel_recs:
+        if str(f.get('date_time', '')).split()[0] == today_str:
+            active_plates.add(str(f.get('plate', '')).upper())
 
-    for plate in linked_plates:
+    if not active_plates:
+        await update.message.reply_text(f"👑 <b>ОТЧЕТ ЗА СЕГОДНЯ ({today_str})</b>\n\nЗаписей об активности автопарка нет.", parse_mode="HTML")
+        return
+
+    report_lines = [f"👑 <b>ОТЧЕТ ЗА СЕГОДНЯ ({today_str})</b>\n"]
+    grand_total = 0.0
+
+    for plate in active_plates:
+        if not plate: continue
         car_info = next((c for c in cars_recs if str(c.get('plate', '')).upper() == plate), {})
         odo = int(car_info.get('odometer', 0))
-        report_lines.append(f"🚗 <b>{plate}</b>\n📍 Пробег: {odo:,} км\n📄 Тех. осмотр до: {car_info.get('tech_inspection', '—')}\n🛡 Страховка до: {car_info.get('insurance', '—')}\n")
         
-        car_total = sum(parse_val(r.get('cost', 0)) for r in hist_recs if str(r.get('plate','')).upper() == plate and r.get('date') == today_str)
-        car_total += sum(parse_val(f.get('cost', 0)) for f in fuel_recs if str(f.get('plate','')).upper() == plate and str(f.get('date_time','')).split()[0] == today_str)
+        today_hist = [r for r in hist_recs if str(r.get('plate','')).upper() == plate and r.get('date') == today_str]
+        today_fuel = [f for f in fuel_recs if str(f.get('plate','')).upper() == plate and str(f.get('date_time','')).split()[0] == today_str]
+        
+        car_total = sum(parse_val(r.get('cost', 0)) for r in today_hist) + sum(parse_val(f.get('cost', 0)) for f in today_fuel)
         grand_total += car_total
-        report_lines.append(f"💰 Затраты сегодня: {car_total:,.0f} MDL")
+
+        report_lines.append(f"🚗 <b>{plate}</b> (Пробег: {odo:,} км)")
         
-        car_services = [s for s in serv_recs if str(s.get('plate', '')).upper() == plate]
-        report_lines.append("🛠 <b>Сервис:</b>")
-        for s in car_services:
-            rem = int(s.get('next_service_odo', 0)) - odo
-            icon = "🚨" if rem <= 0 else ("⚠️" if rem < 1000 else "✅")
-            report_lines.append(f"  {icon} {s.get('service_type')}: ост. {rem:,} км")
-        report_lines.append("\n" + "—"*15 + "\n")
-    report_lines.append(f"💵 <b>ИТОГО: {grand_total:,.2f} MDL</b>".replace(",", " "))
+        if today_fuel:
+            f_cost = sum(parse_val(f.get('cost', 0)) for f in today_fuel)
+            f_liters = sum(parse_val(f.get('liters', 0)) for f in today_fuel)
+            report_lines.append(f"  ⛽ Заправка: {f_liters}л на {f_cost:,.0f} MDL")
+            
+        if today_hist:
+            for h in today_hist:
+                work = h.get('work_details', 'Работы')
+                cost = parse_val(h.get('cost', 0))
+                report_lines.append(f"  🛠 {work}: {cost:,.0f} MDL")
+                
+        report_lines.append(f"  💰 <b>Итого по авто: {car_total:,.0f} MDL</b>\n")
+
+    report_lines.append(f"💵 <b>ОБЩИЕ ЗАТРАТЫ СЕГОДНЯ: {grand_total:,.2f} MDL</b>".replace(",", " "))
     await update.message.reply_text("\n".join(report_lines), parse_mode="HTML")
 
-async def cmd_report_full(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cmd_report_month(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    current_year = datetime.now().strftime("%Y")
-    drivers_recs = get_ws("Водители").get_all_records()
-    linked_plates = [str(r['plate']).upper() for r in drivers_recs if str(r.get('telegram_id')) == str(uid)]
-    if not linked_plates: return
+    if uid not in ADMIN_IDS: return  # Только для админа
 
-    hist_recs, fuel_recs = get_ws("История_ТО").get_all_records(), get_ws("Заправки").get_all_records()
-    report_lines, grand_annual_total = [f"📊 <b>ГОДОВОЙ ОТЧЕТ ({current_year})</b>\n"], 0.0
+    current_month = datetime.now().strftime("%m.%Y")
+    cars_recs = get_ws("Автомобили").get_all_records()
+    all_plates = [str(r.get('plate', '')).upper() for r in cars_recs if r.get('plate')]
 
-    for plate in linked_plates:
-        service_year = sum(parse_val(r.get('cost', 0)) for r in hist_recs if str(r.get('plate','')).upper() == plate and current_year in str(r.get('date','')))
-        fuel_year = sum(parse_val(f.get('cost', 0)) for f in fuel_recs if str(f.get('plate','')).upper() == plate and current_year in str(f.get('date_time','')))
-        car_total = fuel_year + service_year
-        grand_annual_total += car_total
-        report_lines.append(f"🚗 <b>{plate}</b>\n  ⛽ Заправки: {fuel_year:,.0f} MDL\n  🛠 Сервис: {service_year:,.0f} MDL\n  💰 <b>Итого: {car_total:,.0f} MDL</b>\n")
-    report_lines.append(f"📈 <b>ИТОГО ПАРК: {grand_annual_total:,.2f} MDL</b>".replace(",", " "))
+    hist_recs = get_ws("История_ТО").get_all_records()
+    fuel_recs = get_ws("Заправки").get_all_records()
+    
+    report_lines = [f"🚗 <b>ОТЧЕТ ПО ПАРКУ ЗА МЕСЯЦ ({current_month})</b>\n"]
+    grand_month_total = 0.0
+
+    for plate in all_plates:
+        service_month = sum(parse_val(r.get('cost', 0)) for r in hist_recs if str(r.get('plate','')).upper() == plate and current_month in str(r.get('date','')))
+        fuel_month = sum(parse_val(f.get('cost', 0)) for f in fuel_recs if str(f.get('plate','')).upper() == plate and current_month in str(f.get('date_time','')))
+        car_total = fuel_month + service_month
+        grand_month_total += car_total
+        report_lines.append(f"🔹 <b>{plate}</b>\n  ⛽ Заправки: {fuel_month:,.0f} MDL\n  🛠 Сервис/Прочее: {service_month:,.0f} MDL\n  💰 <b>Итого: {car_total:,.0f} MDL</b>\n")
+        
+    report_lines.append(f"📈 <b>ИТОГО ПО ПАРКУ: {grand_month_total:,.2f} MDL</b>".replace(",", " "))
     await update.message.reply_text("\n".join(report_lines), parse_mode="HTML")
+
+async def cmd_efficiency(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid not in ADMIN_IDS: return  # Только для админа
+
+    # Берем сырые данные, чтобы точно попасть в индексы колонок
+    raw_fuel = get_ws("Заправки").get_all_values()
+    if len(raw_fuel) < 2:
+        await update.message.reply_text("Недостаточно данных в таблице заправок для расчета.")
+        return
+    
+    data = raw_fuel[1:] # Пропускаем строку с заголовками
+    stats = {}
+    
+    for row in data:
+        if len(row) < 8: continue # Защита от пустых или сломанных строк
+        plate = str(row[1]).upper()
+        liters = parse_val(row[4])
+        cost = parse_val(row[5])
+        odo = parse_val(row[7])
+        
+        if plate not in stats:
+            stats[plate] = {'odos': [], 'total_liters': 0, 'total_cost': 0}
+            
+        stats[plate]['odos'].append(odo)
+        stats[plate]['total_liters'] += liters
+        stats[plate]['total_cost'] += cost
+
+    report_lines = ["📈 <b>ЭФФЕКТИВНОСТЬ ПАРКА (РАСХОД)</b>\n"]
+    
+    for plate, stat_data in stats.items():
+        if len(stat_data['odos']) < 2:
+            report_lines.append(f"🚗 <b>{plate}</b>: Мало данных (нужно мин. 2 заправки)\n")
+            continue
+        
+        min_odo = min(stat_data['odos'])
+        max_odo = max(stat_data['odos'])
+        distance = max_odo - min_odo
+        
+        if distance <= 0:
+            report_lines.append(f"🚗 <b>{plate}</b>: Некорректная история пробега\n")
+            continue
+        
+        l_per_100 = (stat_data['total_liters'] / distance) * 100
+        cost_per_100 = (stat_data['total_cost'] / distance) * 100
+        
+        report_lines.append(f"🚗 <b>{plate}</b>")
+        report_lines.append(f"  🛣 Учтенный путь: {distance:,.0f} км")
+        report_lines.append(f"  ⛽ Средний расход: {l_per_100:.2f} л / 100 км")
+        report_lines.append(f"  💸 Стоимость: {cost_per_100:,.2f} MDL / 100 км\n")
+
+    await update.message.reply_text("\n".join(report_lines).replace(",", " "), parse_mode="HTML")
 
 # --- ЛОГИКА ОПРОСОВ (МОЙКА, ПРОБЕГ, ЗАПРАВКА, ТО, РЕМОНТ) ---
 async def wash_init(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -291,7 +374,8 @@ def main():
     app.add_handler(MessageHandler(filters.Regex("^📊 Мой статус$"), cmd_status))
     app.add_handler(MessageHandler(filters.Regex("^📋 История$"), cmd_history))
     app.add_handler(MessageHandler(filters.Regex("^👑 Отчёт сегодня$"), cmd_report_today))
-    app.add_handler(MessageHandler(filters.Regex("^🚗 Все авто$"), cmd_report_full))
+    app.add_handler(MessageHandler(filters.Regex("^🚗 Все авто$"), cmd_report_month))
+    app.add_handler(MessageHandler(filters.Regex("^📈 Эффективность$"), cmd_efficiency))
     app.run_polling()
 
 if __name__ == "__main__": main()
